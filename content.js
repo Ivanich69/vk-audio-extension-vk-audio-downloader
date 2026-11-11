@@ -25,21 +25,12 @@
   const bitrateValues = new Map();
   const resolutionValues = new Map();
   let bitrateRequests = 0;
-  function sendRuntimeMessage(message) {
-    try {
-      if (!chrome?.runtime?.id) return Promise.resolve(null);
-      return chrome.runtime.sendMessage(message).catch(() => null);
-    } catch {
-      // The content script can outlive an extension reload in an open tab.
-      return Promise.resolve(null);
-    }
-  }
   const bitrateObserver = new IntersectionObserver(entries => {
     for (const entry of entries) {
       const row = entry.target;
       if (!row.isConnected) { bitrateObserver.unobserve(row); continue; }
       const control = row && rowControls.get(row);
-      if (control) updateControl(row, control);
+      if (control) { control.visible = entry.isIntersecting; updateControl(row, control); }
     }
   });
 
@@ -47,7 +38,7 @@
     if (!track && control.visible) resolveRow(row, retry);
     const cached = track && bitrateValues.get(track.url);
     const value = cached?.value;
-    control.bitrate.textContent = value ? `${value.kbps} кбит/с` : cached?.pending ? "…" : "— кбит/с";
+    control.bitrate.textContent = value ? `≈${value.kbps} кбит/с` : cached?.pending ? "…" : "— кбит/с";
     control.bitrate.title = value ? "Оценка по аудиокадрам небольшого фрагмента. При VBR средний битрейт всего трека может отличаться." : `${cached?.reason || "Битрейт пока не определён."} Нажми, чтобы повторить проверку (не чаще раза в 5 секунд). Скачивание доступно.`;
     if (!track || cached?.pending || value || (!retry && cached?.until > Date.now()) || !control.visible || bitrateRequests >= 2) return;
     const url = track.url;
@@ -59,7 +50,7 @@
     bitrateValues.set(url, entry);
     bitrateRequests++;
     control.bitrate.textContent = "…";
-    sendRuntimeMessage({ type: "GET_BITRATE", id: track.id, retry }).then(result => {
+    chrome.runtime.sendMessage({ type: "GET_BITRATE", id: track.id, retry }).then(result => {
       const rate = result?.bitrate;
       if (result?.ok && result.url === url && Number.isInteger(rate?.kbps) && rate.kbps >= 8 && rate.kbps <= 2000) entry.value = rate;
       entry.reason = result?.bitrateReason;
@@ -118,7 +109,7 @@
     }
     const entry = { pending: true, until: 0 };
     resolutionValues.set(audioId, entry); bitrateRequests++;
-    sendRuntimeMessage({ type: "RESOLVE_AUDIO", audioId }).finally(() => {
+    chrome.runtime.sendMessage({ type: "RESOLVE_AUDIO", audioId }).catch(() => {}).finally(() => {
       entry.pending = false; entry.until = Date.now() + 60000; bitrateRequests--; scheduleScan();
     });
   }
@@ -163,7 +154,7 @@
     rowClicks.set(nonce, { id: track.id, row, at: Date.now() });
     control.busy = true; updateControl(row, control);
     try {
-      const result = await sendRuntimeMessage({ type: "ROW_DOWNLOAD", id: track.id, nonce });
+      const result = await chrome.runtime.sendMessage({ type: "ROW_DOWNLOAD", id: track.id, nonce });
       if (!result?.ok) showNotice(result?.error || "Не удалось начать загрузку. Перезагрузи VK и повтори попытку.");
       else showNotice(result.background ? "Загрузка открыта в фоновой вкладке. Прогресс и ошибки доступны в ней." : "Открыта вкладка сохранения аудио.");
     } catch {
@@ -184,15 +175,8 @@
         host.setAttribute("data-vk-audio-download", "");
         const shadow = host.attachShadow({ mode: "open" });
         const style = document.createElement("style");
-        style.textContent = ":host{all:initial;position:absolute;box-sizing:border-box;display:inline-flex;vertical-align:middle;width:0;height:0;min-width:0;min-height:0;flex:0 0 0;overflow:hidden;margin:0;padding:0}:host-context([data-testid^=\"MusicTrackRow\"]:hover),:host(:focus-within){position:static;width:24px;height:24px;min-width:24px;min-height:24px;flex:0 0 24px;overflow:visible}button{box-sizing:border-box;width:24px;height:24px;border:0;border-radius:6px;padding:0;background:transparent;color:#5181b8;font:600 19px/24px system-ui,sans-serif;cursor:pointer}button:hover{background:#5181b822}button:focus-visible{outline:2px solid #5181b8;outline-offset:2px}button:disabled{opacity:.4;cursor:default}";
+        style.textContent = ":host{all:initial;display:inline-flex;vertical-align:middle;margin-inline-start:6px;flex-shrink:0}button{box-sizing:border-box;width:28px;height:28px;border:0;border-radius:7px;padding:0;background:transparent;color:#5181b8;font:600 22px/28px system-ui,sans-serif;cursor:pointer}button:hover{background:#5181b822}button:focus-visible{outline:2px solid #5181b8;outline-offset:2px}button:disabled{opacity:.4;cursor:default}";
         const button = document.createElement("button"); button.type = "button";
-        shadow.append(style, button);
-
-        const bitrateHost = document.createElement("span");
-        bitrateHost.setAttribute("data-vk-audio-bitrate", "");
-        const bitrateShadow = bitrateHost.attachShadow({ mode: "open" });
-        const bitrateStyle = document.createElement("style");
-        bitrateStyle.textContent = ":host{all:initial;position:absolute;box-sizing:border-box;display:inline-flex;vertical-align:middle;align-items:center;width:0;height:0;max-width:0;min-width:0;flex:0 0 0;overflow:hidden}:host-context([data-testid^=\"MusicTrackRow\"]:hover),:host(:focus-within){position:static;width:auto;height:auto;max-width:74px;min-width:0;flex:0 1 auto;overflow:visible}.bitrate{display:inline-block;max-width:74px;overflow:hidden;text-overflow:ellipsis;text-align:right;font:11px/1.3 system-ui,sans-serif;color:#8799af;white-space:nowrap;cursor:pointer}.bitrate:focus-visible{outline:2px solid #5181b8;outline-offset:2px}";
         const bitrate = document.createElement("span"); bitrate.className = "bitrate";
         bitrate.setAttribute("role", "button"); bitrate.tabIndex = 0;
         bitrate.setAttribute("aria-label", "Повторить проверку битрейта");
@@ -200,42 +184,18 @@
         bitrate.addEventListener("keydown", event => {
           if (event.key === "Enter" || event.key === " ") { event.preventDefault(); event.stopPropagation(); updateBitrate(row, control, rowTrack(row), true); }
         });
-        bitrateShadow.append(bitrateStyle, bitrate);
-        control = { host, button, bitrateHost, bitrate, busy: false, visible: false };
+        style.textContent += ":host{align-items:center;gap:4px}.bitrate{display:inline-block;width:88px;text-align:right;font:11px/1.3 system-ui,sans-serif;color:#8799af;white-space:nowrap}";
+        style.textContent += ".bitrate{cursor:pointer}.bitrate:focus-visible{outline:2px solid #5181b8;outline-offset:2px}";
+        shadow.append(style, bitrate, button);
+        control = { host, button, bitrate, busy: false, visible: false };
         rowControls.set(row, control);
         // Stop events before VK's bubble handlers can start or pause playback.
-        for (const element of [host, bitrateHost]) {
-          for (const name of ["pointerdown", "mousedown", "pointerup", "mouseup", "keydown", "keyup", "dblclick"]) element.addEventListener(name, event => event.stopPropagation());
-          element.addEventListener("click", event => { event.preventDefault(); event.stopPropagation(); });
-        }
+        for (const name of ["pointerdown", "mousedown", "pointerup", "mouseup", "keydown", "keyup", "dblclick"]) host.addEventListener(name, event => event.stopPropagation());
+        host.addEventListener("click", event => { event.preventDefault(); event.stopPropagation(); });
         button.addEventListener("click", event => downloadRow(event, row, control));
       }
-      const card = row.closest('[data-testid^="MusicTrackRow"]') || row;
-      const actionPeer = card.querySelector('button[data-testid="MusicAudio_OpenSnippet"]') ||
-        [...card.querySelectorAll(".audio_row__action")]
-          .find(element => !element.hasAttribute("data-vk-audio-download"));
-      const actions = card.querySelector('[data-testid="audiorow-actions"]') ||
-        card.querySelector(":scope > .audio_row__actions") || card.querySelector(".audio_row__actions");
-      const target = actions || actionPeer?.parentElement || row;
-      let actionItem = actionPeer;
-      while (actionItem && actionItem.parentElement !== target) actionItem = actionItem.parentElement;
-      const anchor = actionItem || target.firstElementChild || null;
-      control.host.style.cssText = "";
-      if (control.host.parentElement !== target || (anchor && control.host.nextElementSibling !== anchor)) {
-        target.insertBefore(control.host, anchor);
-      }
-      if (control.hoverBoundCard !== card) {
-        control.hoverBoundCard = card;
-        card.addEventListener("pointerenter", () => {
-          control.visible = true;
-          updateControl(row, control);
-        });
-        card.addEventListener("pointerleave", () => { control.visible = false; });
-      }
-      if (control.bitrateHost.parentElement !== target || control.bitrateHost.nextElementSibling !== control.host) {
-        target.insertBefore(control.bitrateHost, control.host);
-      }
-      control.visible = card.matches(":hover");
+      const target = row.querySelector(".audio_row__actions") || row.querySelector(".audio_row__title") || row;
+      if (control.host.parentElement !== target) target.append(control.host);
       bitrateObserver.observe(row);
       updateControl(row, control);
     }
@@ -350,7 +310,7 @@
       } catch { /* Ignore malformed page messages. */ }
     }
     if (forward && window.top !== window && accepted.length) {
-      sendRuntimeMessage({ type: "FRAME_TRACKS", tracks: accepted });
+      chrome.runtime.sendMessage({ type: "FRAME_TRACKS", tracks: accepted }).catch(() => {});
     }
     scheduleScan();
   }
